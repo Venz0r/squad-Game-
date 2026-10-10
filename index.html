@@ -1,0 +1,892 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#07030d">
+<meta name="description" content="SQAD Game — Тольятти Ultimate Arcade & Auction">
+<title>SQAD Game | Тольятти</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script>
+/* SQAD ROYALE MULTIPLAYER FRONTEND */
+const ROYALE_BETS=[10,25,50,100,250];
+let royaleBet=10,royaleRoomCode='',royaleState=null,royalePoll=null,royaleBusy=false,royaleLastSpinRound=0,royaleLastSpinPoints=0,royaleLastSpinSymbols=[];
+function royaleApi(action,extra={}){
+  if(!tg?.initData) return Promise.reject(new Error('Telegram initData is empty'));
+  const controller=new AbortController();
+  const timeout=setTimeout(()=>controller.abort(),10000);
+  return fetch(SQAD_BUILD.royaleUrl,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({initData:tg.initData,action,...extra}),signal:controller.signal}).then(async r=>{const j=await r.json().catch(()=>({}));if(!r.ok!j.ok)throw new Error(j.error('ROYALE_SERVER_'+r.status));return j;}).catch(e=>{if(e?.name==='AbortError')throw new Error('ROYALE_SERVER_TIMEOUT');throw e;}).finally(()=>clearTimeout(timeout));
+}
+function selectRoyaleBet(amount,el){if(royaleBusy)return;royaleBet=ROYALE_BETS.includes(Number(amount))?Number(amount):10;document.querySelectorAll('.royaleBet').forEach(x=>x.classList.toggle('active',Number(x.dataset.royaleBet)===royaleBet));haptic('light');}
+function royaleUiMode(inRoom){document.getElementById('royaleLobby')?.classList.toggle('royaleHidden',inRoom);document.getElementById('royaleRoom')?.classList.toggle('royaleHidden',!inRoom);}
+function royaleStatusText(status){return ({waiting:'Сбор тусовки',playing:'Баттл идёт',finished:'Итоги подведены',cancelled:'Комната закрыта',starting:'Запуск!'})[status]status'—';}
+function royaleAvatar(p){return String(p?.avatarp?.display_namep?.username'S').replace(/^@/,'').trim().charAt(0).toUpperCase()'S';}
+function royaleEscape(s){return escapeHTML(s??'');}
+function royalePrizeFor(place,pot,count){pot=safeInt(pot);if(place===1)return Math.floor(pot*.7);if(place===2&&count>=3)return Math.floor(pot*.2);if(place===2&&count===2)return pot-Math.floor(pot*.7);if(place===3&&count>=3)return pot-Math.floor(pot*.7)-Math.floor(pot*.2);return 0;}
+function royaleRenderPlayers(){
+  const el=document.getElementById('royalePlayers');if(!el)return;const ps=Array.isArray(royaleState?.players)?royaleState.players:[];
+  if(!ps.length){el.innerHTML='<div class="royaleEmpty">Ждем участников сквада…</div>';return;}
+  el.innerHTML=ps.map(p=>{const ready=!!p.ready;const host=p.is_host?' 👑':'';return '<div class="royalePlayer '+(p.is_me?'me ':'')+(ready?'ready':'')+'"><div class="royaleReadyDot '+(ready?'on':'')+'"></div><div class="royaleAvatar">'+royaleEscape(royaleAvatar(p))+'</div><div class="royalePlayerMain"><div class="royalePlayerName">'+royaleEscape(p.display_namep.username'Участник')+(p.is_me?' <span style="color:#ff3fc8;font-size:9px">ТЫ</span>':'')+'<span class="royaleHost">'+host+'</span></div><div class="royalePlayerMeta">'+(ready?'ГОТОВ К ШОУ':'В ПОИСКЕ')+'</div></div><div class="royalePlayerScore">'+safeInt(p.total_score)+'<span style="display:block;color:#aa9ab9;font-size:8px">БАЛЛОВ</span>'+(p.place?'<span class="royalePlayerPlace">#'+p.place+'</span>':'')+'</div></div>'}).join('');
+}
+function royaleRenderTable(){
+  const el=document.getElementById('royaleScoreTable');if(!el)return;const ps=[...(royaleState?.players||[])].sort((a,b)=>{if(a.place&&b.place)return a.place-b.place;if(a.place)return -1;if(b.place)return 1;return safeInt(b.total_score)-safeInt(a.total_score)});
+  if(!ps.length){el.innerHTML='<div class="royaleEmpty">Таблица баттла появится здесь.</div>';return;}
+  el.innerHTML='<div class="royaleTableRow head"><div>#</div><div>УЧАСТНИК</div><div style="text-align:right">БАЛЛЫ</div><div style="text-align:right">СТАТУС</div></div>'+ps.map((p,i)=>'<div class="royaleTableRow"><div class="place">'+(p.placei+1)+'</div><div class="rname">'+royaleEscape(p.display_name'Участник')+(p.is_me?' · ТЫ':'')+'</div><div class="rscore">'+safeInt(p.total_score)+'</div><div class="rstate">'+(p.place?'✓':'…')+'</div></div>').join('');
+}
+function royaleRenderFinal(){
+  const box=document.getElementById('royaleFinal');if(!box)return;const r=royaleState?.room;if(!rr.status!=='finished'){box.classList.add('royaleHidden');box.innerHTML='';return;}const me=(royaleState.players[]).find(p=>p.is_me);const count=(royaleState.players[]).length;const place=safeInt(me?.place);const prize=royalePrizeFor(place,safeInt(r.pot),count);const title=place===1?'ТЫ — ТОП-1 SQAD!':place?'БАТТЛ ЗАВЕРШЕН':'ИТОГИ БАТТЛА';box.classList.remove('royaleHidden');box.innerHTML='<div class="royaleFinal"><div class="royaleFinalCrown">'+(place===1?'🔥':'🏆')+'</div><div class="royaleFinalTitle">'+title+'</div><div class="royaleFinalMeta">Твое место в скваде</div><div class="royalePrize">#'+(place'—')+'</div><div class="royaleFinalMeta">'+(prize?'Выигрыш: <b style="color:#ffd45c">+'+prize+'</b> баллов':'Без призовой выплаты')+' · Банк '+safeInt(r.pot)+'</div><button class="primary" style="margin-top:12px" onclick="royaleExitFinished()">В ЛОББИ SQAD</button></div>';
+}
+function royaleRender(){
+  const r=royaleState?.room;if(!r){royaleUiMode(false);return;}
+  royaleUiMode(true);setText('royaleRoomCode',r.code);setText('royaleRoomStatus',royaleStatusText(r.status));setText('royaleRoundNow',safeInt(r.current_round));setText('royalePot',formatPoints(r.pot));
+  royaleRenderPlayers();royaleRenderTable();royaleRenderFinal();
+  const ps=royaleState.players||[],me=ps.find(p=>p.is_me),host=!!me?.is_host,playing=r.status==='playing',waiting=r.status==='waiting',finished=r.status==='finished',already=royaleLastSpinRound===safeInt(r.current_round);
+  const lobbyActions=document.getElementById('royaleLobbyActions');if(lobbyActions)lobbyActions.classList.toggle('royaleHidden',!waiting);
+  const readyBtn=document.getElementById('royaleReadyBtn');if(readyBtn){readyBtn.textContent=me?.ready?'✕ НЕ ГОТОВ':'✓ ГОТОВ';readyBtn.disabled=royaleBusy||!waiting;}
+  const startBtn=document.getElementById('royaleStartBtn');if(startBtn){startBtn.disabled=royaleBusy!waiting!hostps.length<2!ps.every(p=>p.ready);startBtn.textContent=host?'🔥 СТАРТ БАТТЛА':'🔒 ЖДЕМ ХОСТА';}
+  const play=document.getElementById('royalePlayArea');if(play)play.classList.toggle('royaleHidden',!playing);
+  const spinBtn=document.getElementById('royaleSpinBtn');if(spinBtn){spinBtn.disabled=royaleBusy||already;spinBtn.textContent=already?'✓ ХОД СДЕЛАН':'🎰 КРУТИТЬ SQAD';}
+  const wait=document.getElementById('royaleSpinWait');if(wait){const done=(royaleState.current_results||[]).length;wait.textContent=alreadyText(done,ps.length,already);}
+  const leave=document.getElementById('royaleLeaveBtn');if(leave)leave.textContent=finished?'← ЗАКРЫТЬ ИТОГИ':'← ВЫЙТИ ИЗ КОМНАТЫ';
+  if(finished&&royaleLastSpinRound>0) setText('royaleSpinInfo','🏁 Баттл завершен!');
+  if(r.status==='cancelled')setText('royaleSpinInfo','Комната распущена');
+  setText('royaleLobbyBalance',formatPoints(data.score));
+}
+function alreadyText(done,total,already){if(already)return 'Твой ход принят. Ждем остальных участников…';if(done>=total&&total)return 'Все сделали ходы — переходим к следующему раунду!';return 'Сделали ходы в раунде: '+done+' / '+total;}
+async function royaleRefresh(){
+  if(!royaleRoomCode)return;try{const r=await royaleApi('royale_state',{room_code:royaleRoomCode});royaleState=r;royaleRender();}catch(e){if(['ROOM_NOT_FOUND','NOT_IN_ROOM'].includes(e.message)){royaleStopPolling();royaleRoomCode='';royaleState=null;royaleUiMode(false);if(currentScreen==='royale')toast('Комната закрыта');}else console.warn('Royale state:',e.message)}}
+function royaleStartPolling(){clearInterval(royalePoll);royalePoll=setInterval(()=>{if(currentScreen==='royale'&&royaleRoomCode&&!royaleBusy)royaleRefresh()},1500)}
+function royaleStopPolling(){clearInterval(royalePoll);royalePoll=null}
+async function royaleCreate(){if(royaleBusy)return;royaleBusy=true;const btn=document.getElementById('royaleCreateBtn');if(btn)btn.disabled=true;try{const r=await royaleApi('royale_create',{bet:royaleBet});royaleState=r;royaleRoomCode=r.room?.code||'';royaleLastSpinRound=0;royaleLastSpinPoints=0;royaleLastSpinSymbols=[];data.score=Math.max(0,data.score-royaleBet);updateUI();royaleRender();royaleStartPolling();toast('🔥 Создана комната SQAD: '+royaleRoomCode);haptic('medium');}catch(e){royaleShowError(e);toast('⚠️ '+royaleHumanError(e.message));}finally{royaleBusy=false;if(btn)btn.disabled=false;}}
+async function royaleJoin(){if(royaleBusy)return;const code=(document.getElementById('royaleJoinCode')?.value'').trim().toUpperCase();if(code.length!==6)return toast('Введи 6-значный код комнаты');royaleBusy=true;try{const r=await royaleApi('royale_join',{room_code:code});royaleState=r;royaleRoomCode=r.room?.codecode;royaleLastSpinRound=0;data.score=Math.max(0,data.score-safeInt(r.room?.bet));updateUI();royaleRender();royaleStartPolling();toast('🎮 Ты в скваде комнаты '+royaleRoomCode);haptic('medium');}catch(e){royaleShowError(e);toast('⚠️ '+royaleHumanError(e.message));}finally{royaleBusy=false;}}
+async function royaleToggleReady(){if(royaleBusy!royaleRoomCode)return;const me=(royaleState?.players[]).find(p=>p.is_me);royaleBusy=true;try{const r=await royaleApi('royale_ready',{room_code:royaleRoomCode,ready:!me?.ready});royaleState=r;royaleRender();haptic('light');}catch(e){royaleShowError(e);toast('⚠️ '+royaleHumanError(e.message));}finally{royaleBusy=false;royaleRender();}}
+async function royaleStart(){if(royaleBusy||!royaleRoomCode)return;royaleBusy=true;try{const r=await royaleApi('royale_start',{room_code:royaleRoomCode});royaleState=r;royaleLastSpinRound=0;royaleRender();toast('🚀 Баттл SQAD начался!');haptic('heavy');}catch(e){royaleShowError(e);toast('⚠️ '+royaleHumanError(e.message));}finally{royaleBusy=false;royaleRender();}}
+async function royaleSpin(){if(royaleBusy!royaleRoomCoderoyaleState?.room?.status!=='playing')return;const round=safeInt(royaleState.room.current_round);if(royaleLastSpinRound===round)return;royaleBusy=true;const btn=document.getElementById('royaleSpinBtn');if(btn)btn.disabled=true;setText('royaleSpinInfo','🎲 Крутим барабан SQAD…');try{const r=await royaleApi('royale_spin',{room_code:royaleRoomCode});const sp=r.spin||{};royaleLastSpinRound=round;royaleLastSpinPoints=safeInt(sp.points);royaleLastSpinSymbols=Array.isArray(sp.symbols)?sp.symbols:[];royaleState=r;await royaleAnimateSpin(royaleLastSpinSymbols);setText('royaleSpinInfo',(royaleLastSpinPoints>=25?'🔥 ОГОНЬ!':'✨')+' +'+royaleLastSpinPoints+' баллов');haptic('medium');royaleRender();}catch(e){if(e.message==='ALREADY_SPUN')royaleLastSpinRound=round;royaleShowError(e);toast('⚠️ '+royaleHumanError(e.message));}finally{royaleBusy=false;royaleRender();}}
+async function royaleAnimateSpin(symbols){const ids=['rr1','rr2','rr3'];const fallback=['🔥','🎟️','🎧'];for(let k=0;k<8;k++){ids.forEach((id,i)=>setText(id,fallback[(i+k)%fallback.length]));await new Promise(r=>setTimeout(r,45));}ids.forEach((id,i)=>setText(id,symbols[i]||fallback[i]));ids.forEach(id=>document.getElementById(id)?.classList.add('flash'));setTimeout(()=>ids.forEach(id=>document.getElementById(id)?.classList.remove('flash')),520);}
+async function royaleLeave(){if(!royaleRoomCode)return;const finished=royaleState?.room?.status==='finished';if(finished)return royaleExitFinished();if(royaleBusy)return;royaleBusy=true;try{const r=await royaleApi('royale_leave',{room_code:royaleRoomCode});if(r.refunded){data.score+=safeInt(r.refunded);updateUI();toast('↩️ Возвращено '+r.refunded+' баллов');}royaleStopPolling();royaleRoomCode='';royaleState=null;royaleLastSpinRound=0;royaleUiMode(false);openScreen('royale');}catch(e){royaleShowError(e);toast('⚠️ '+royaleHumanError(e.message));}finally{royaleBusy=false;}}
+function royaleExitFinished(){royaleStopPolling();royaleRoomCode='';royaleState=null;royaleLastSpinRound=0;royaleUiMode(false);document.getElementById('royaleFinal')?.classList.add('royaleHidden');document.getElementById('royaleError')?.classList.add('royaleHidden');updateUI();}
+function copyRoyaleCode(){const code=royaleState?.room?.code||royaleRoomCode;if(!code)return;const done=()=>toast('📋 Код сквада '+code+' скопирован');if(navigator.clipboard?.writeText)navigator.clipboard.writeText(code).then(done).catch(()=>royaleCopyFallback(code));else royaleCopyFallback(code);}
+function royaleCopyFallback(code){const t=document.createElement('textarea');t.value=code;t.style.position='fixed';t.style.opacity='0';document.body.appendChild(t);t.select();try{document.execCommand('copy');toast('📋 Код '+code+' скопирован')}catch(e){toast('Код: '+code)}t.remove();}
+function royaleHumanError(e){return ({ROYALE_SERVER_TIMEOUT:'Сервер SQAD не отвечает.',INVALID_ROYALE_BET:'Неверная ставка.',INSUFFICIENT_POINTS:'Недостаточно баллов SQAD.',ROOM_NOT_FOUND:'Комната не найдена.',ROOM_NOT_JOINABLE:'В эту комнату уже нельзя войти.',ROOM_FULL:'Комната заполнена (макс 8).',NEED_TWO_PLAYERS:'Нужно минимум 2 игрока.',PLAYERS_NOT_READY:'Не все готовы.',ONLY_HOST_CAN_START:'Только создатель может запустить баттл.',ROOM_ALREADY_STARTED:'Баттл уже идет.',ALREADY_SPUN:'Ты уже сделал ход в этом раунде.',ROOM_NOT_PLAYING:'Баттл не активен.',ROOM_NOT_WAITING:'Комната уже стартовала.',NOT_IN_ROOM:'Ты вышел из комнаты.',ROOM_CODE_FAILED:'Не удалось создать код.'}[e])e'Ошибка SQAD Royale.';}
+function royaleShowError(e){const el=document.getElementById('royaleError');if(!el)return;el.classList.remove('royaleHidden');el.innerHTML='<div class="royaleError">⚠️ '+royaleEscape(royaleHumanError(e.message))+'</div>';clearTimeout(royaleShowError._t);royaleShowError._t=setTimeout(()=>el.classList.add('royaleHidden'),4500);}
+function royalePatchOpenScreen(){
+  const original=openScreen;
+  openScreen=function(id){if(currentScreen==='royale'&&id!=='royale')royaleStopPolling();original(id);if(id==='royale'){setText('royaleLobbyBalance',formatPoints(data.score));if(royaleRoomCode){royaleUiMode(true);royaleRefresh();royaleStartPolling()}else royaleUiMode(false);}}
+}
+</script>
+<style>
+:root{--bg:#07030d;--panel:#12081f;--panel2:#1b0b2d;--line:#40205f;--text:#fffaff;--muted:#aa9ab9;--pink:#ff3fc8;--violet:#8d5cff;--cyan:#48dcff;--green:#56f0a4;--gold:#ffd45c;--red:#ff4d6d;--shadow:0 18px 55px rgba(0,0,0,.46)}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}html,body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;min-height:100%;overflow-x:hidden}button{font:inherit;color:inherit;border:0;cursor:pointer}body{padding-bottom:env(safe-area-inset-bottom)}
+#loading{position:fixed;inset:0;background:radial-gradient(circle at 50% 25%,#32134d 0,#10071a 48%,#07030d 100%);display:flex;align-items:center;justify-content:center;z-index:1000;transition:.45s}.loadbox{text-align:center;width:min(86vw,360px)}.cat{font-size:64px;filter:drop-shadow(0 0 20px var(--pink));animation:bob 1.4s infinite ease-in-out}.loadtitle{font-size:34px;font-weight:900;letter-spacing:.5px;margin:8px 0;color:var(--text)}.loadsub{color:var(--muted);font-size:12px;letter-spacing:2px}.bar{height:8px;background:#1b0b2d;border-radius:99px;overflow:hidden;margin:25px 0 10px;border:1px solid var(--line)}.bar>i{display:block;width:0;height:100%;background:linear-gradient(90deg,var(--violet),var(--pink));box-shadow:0 0 18px var(--pink);transition:width .3s}.loadstep{font-size:12px;color:var(--muted)}
+#app{display:none;min-height:100vh;background:radial-gradient(circle at 50% -10%,#32124b 0,#10071a 38%,var(--bg) 75%)}.wrap{width:min(100%,620px);margin:auto;padding:12px 14px 100px}.header{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 2px 16px;position:sticky;top:0;z-index:40;background:linear-gradient(#07030de8,#07030d00);backdrop-filter:blur(10px)}
+.brand{font-weight:950;font-size:22px;letter-spacing:-.5px;color:var(--text);text-shadow:0 0 18px rgba(255,63,200,0.3)}.brand small{display:block;color:var(--pink);font-size:9px;letter-spacing:2px;margin-top:1px}
+.user{display:flex;align-items:center;gap:8px;background:linear-gradient(145deg,#1b0b2d,#12081f);border:1px solid var(--line);padding:7px 10px;border-radius:15px;box-shadow:0 8px 25px rgba(0,0,0,0.5)}
+.avatar,.bigavatar{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;background:linear-gradient(135deg,var(--violet),var(--pink));color:#fff;font-weight:900;box-shadow:0 0 25px rgba(155,92,255,0.3)}
+.uname{font-size:12px;font-weight:800;max-width:145px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.owner{color:var(--gold);font-size:9px;margin-left:4px;border:1px solid #8b6a1e;border-radius:6px;padding:2px 4px;background:#30250b;vertical-align:middle}
+.screen{display:none;animation:in .2s ease}.screen.active{display:block}
+.hero{background:linear-gradient(145deg,#24103d 0,#12071e 62%,#0d0615 100%);border:1px solid #543077;border-radius:24px;padding:20px;box-shadow:0 22px 70px rgba(0,0,0,0.8);position:relative;overflow:hidden}
+.hero:after{content:"";position:absolute;width:180px;height:180px;border-radius:50%;background:rgba(255,79,207,0.15);right:-80px;top:-80px;filter:blur(4px)}
+.eyebrow{color:var(--pink);font-size:10px;font-weight:900;letter-spacing:2px}
+.h1{font-size:31px;line-height:1.03;font-weight:950;margin:8px 0;letter-spacing:-1.2px;color:var(--text)}
+.muted{color:var(--muted)}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:18px}
+.stat{background:#0c0514cc;border:1px solid #3d1e58;border-radius:15px;padding:11px;box-shadow:inset 0 1px rgba(255,255,255,0.04)}
+.stat b{display:block;font-size:19px;color:#fff}
+.stat span{font-size:10px;color:var(--muted)}
+.grid,.arcadeGrid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
+.mode{background:linear-gradient(145deg,#21102f,#100719);border:1px solid #472565;border-radius:20px;padding:10px;text-align:left;box-shadow:0 14px 35px rgba(0,0,0,0.5);transition:.15s;min-height:0}
+.mode:hover{border-color:var(--pink);box-shadow:0 0 0 1px rgba(255,63,200,0.2),0 18px 40px rgba(0,0,0,0.6)}
+.mode:active{transform:scale(.98)}
+.mode b{display:block;margin-top:8px;font-size:14px;color:#fff}
+.mode span{display:block;font-size:11px;color:var(--muted);margin-top:4px;min-height:28px}
+.sectionTitle{font-size:17px;font-weight:900;margin:18px 2px 9px;color:var(--text);letter-spacing:-.2px}
+.gamecard{background:linear-gradient(145deg,#21102f,#0e0615);border:1px solid #4b2867;border-radius:24px;padding:18px;text-align:center;box-shadow:0 20px 55px rgba(0,0,0,0.7)}
+.reels{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:18px 0}
+.reel{height:98px;border-radius:18px;background:radial-gradient(circle at 50% 35%,#24132f,#08030d 70%);border:1px solid #4c2866;display:grid;place-items:center;font-size:45px;box-shadow:inset 0 0 30px #000,0 8px 20px rgba(0,0,0,0.3)}
+.target{background:#17101d;border:1px solid #51315e;border-radius:14px;padding:10px;margin:8px 0;color:#fff}
+.primary{width:100%;padding:14px 16px;border-radius:15px;background:linear-gradient(100deg,var(--violet),var(--pink));color:#fff;font-weight:950;box-shadow:0 12px 32px rgba(155,92,255,0.3);letter-spacing:.4px}
+.primary:disabled{opacity:.45;cursor:not-allowed}
+.secondary{padding:11px 14px;border-radius:13px;background:#1d0d2b;border:1px solid #4a2864;font-weight:800;color:#fff}
+.result{min-height:27px;font-weight:900;color:var(--gold);margin:9px}
+.timer{font-size:42px;font-weight:950;margin:5px;color:var(--cyan)}
+.bigscore{font-size:34px;font-weight:950;color:var(--pink)}
+.profile{display:grid;grid-template-columns:72px 1fr;gap:14px;align-items:center;background:linear-gradient(145deg,#1b0c29,#0f0617);border:1px solid #4b2867;border-radius:22px;padding:16px}
+.bigavatar{width:72px;height:72px;border-radius:22px;display:grid;place-items:center;font-size:28px;box-shadow:0 10px 28px rgba(155,92,255,0.3)}
+.levelbar{height:8px;background:#271335;border-radius:99px;overflow:hidden;margin-top:8px}
+.levelbar i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),var(--violet));width:0}
+.list{display:grid;gap:8px}
+.row{display:flex;align-items:center;justify-content:space-between;gap:10px;background:#130822;border:1px solid #301544;border-radius:15px;padding:12px}
+.rank{width:28px;text-align:center;font-weight:950;color:var(--gold)}
+.rowmain{display:flex;align-items:center;gap:9px;min-width:0;flex:1}
+.mini{width:32px;height:32px;border-radius:10px;background:#2b1240;display:grid;place-items:center}
+.rowname{font-weight:800;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.score{font-weight:950;color:var(--cyan)}
+.ach{display:flex;gap:12px;align-items:center}
+.achicon{font-size:26px;width:38px;text-align:center}
+.locked{filter:grayscale(1);opacity:.42}
+.footer{position:fixed;left:50%;bottom:0;transform:translateX(-50%);width:min(100%,620px);padding:8px 14px calc(8px + env(safe-area-inset-bottom));background:rgba(7,3,13,0.93);backdrop-filter:blur(16px);border-top:1px solid #32164b;display:flex;justify-content:space-around;z-index:50}
+.nav{background:transparent;color:var(--muted);font-size:10px;padding:5px 8px}
+.nav.active{color:#fff;text-shadow:0 0 14px var(--pink)}
+.nav i{display:block;font-size:19px;margin-bottom:2px;font-style:normal}
+.toast{position:fixed;left:50%;bottom:90px;transform:translate(-50%,20px);opacity:0;pointer-events:none;background:#1c0d2b;border:1px solid #62347e;padding:11px 15px;border-radius:14px;font-size:12px;font-weight:800;z-index:200;transition:.25s;box-shadow:var(--shadow)}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+
+/* MODE PREVIEWS */
+.modePreview{height:104px;border-radius:16px;margin:-2px -2px 10px;overflow:hidden;position:relative;border:1px solid #472565;background:#050b07}
+.modePreview:after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,transparent 30%,rgba(0,0,0,0.7) 100%)}
+.previewIcon{position:absolute;inset:0;display:grid;place-items:center;font-size:46px;z-index:1;filter:drop-shadow(0 0 14px rgba(255,63,200,0.5));animation:previewFloat 2.5s ease-in-out infinite}
+@keyframes previewFloat{50%{transform:translateY(-4px) scale(1.04)}}
+.previewBadge{position:absolute;left:8px;top:8px;z-index:2;font-size:8px;font-weight:950;letter-spacing:1px;padding:5px 7px;border-radius:99px;background:rgba(27,11,45,0.9);border:1px solid var(--violet);color:#ffb3ec}
+.previewClassic{background:radial-gradient(circle at 50% 40%,#4b155a,#100719 68%)}
+.previewTime{background:radial-gradient(circle at 50% 40%,#153d5a,#071019 68%)}
+.previewTarget{background:radial-gradient(circle at 50% 40%,#5a3a15,#191007 68%)}
+.previewRoyale{background:radial-gradient(circle at 50% 40%,#3b1c72,#080611 68%)}
+.previewFlip{background:radial-gradient(circle at 50% 40%,#5a1534,#190710 68%)}
+.previewTap{background:radial-gradient(circle at 50% 40%,#155a3c,#071910 68%)}
+.previewAuction{background:radial-gradient(circle at 50% 40%,#5a4e15,#191607 68%)}
+
+/* BALANCE BOX */
+.balanceBox{display:grid!important;grid-template-columns:minmax(0,1fr) minmax(78px,auto);align-items:center;gap:16px;width:100%;min-height:78px;margin-top:12px;padding:14px 15px;border-radius:18px;overflow:hidden;background:linear-gradient(135deg,#2c1247,#160a23)!important;border:1px solid #623a80!important;box-shadow:inset 0 1px rgba(255,255,255,0.05),0 12px 35px rgba(0,0,0,0.5)!important}
+.balanceBox small{display:block;font-size:10px;line-height:1.15;letter-spacing:1px;white-space:nowrap;color:#c5afd9}
+.balanceBox .num{display:block;margin-top:4px;font-size:clamp(20px,6.5vw,28px);line-height:1.05;font-weight:950;letter-spacing:-.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums;color:var(--gold)!important;text-shadow:0 0 20px rgba(255,212,92,0.3)!important}.balanceBox .rankValue{font-size:clamp(20px,6vw,26px);text-align:right}
+
+/* LUCKY ROYALE — SQAD EDITION */
+.royaleHero{position:relative;overflow:hidden;background:radial-gradient(circle at 50% 0%,#3b174f 0,#190a28 44%,#0e0617 100%);border:1px solid #6a3c86;border-radius:26px;padding:18px;box-shadow:0 25px 75px rgba(0,0,0,0.6)}
+.royaleHero:before{content:"";position:absolute;inset:-70px -80px auto;height:170px;background:radial-gradient(circle,rgba(255,63,200,0.15),transparent 65%);pointer-events:none}
+.royaleKicker{font-size:9px;font-weight:950;letter-spacing:2px;color:var(--pink)}.royaleTitle{font-size:30px;font-weight:950;letter-spacing:-1px;margin:4px 0 6px;color:#fff}.royaleSub{font-size:12px;line-height:1.45;color:var(--muted);max-width:480px}
+.royaleGlow{position:absolute;right:12px;top:10px;font-size:42px;filter:drop-shadow(0 0 18px rgba(255,63,200,0.5));animation:royaleFloat 2.4s ease-in-out infinite}@keyframes royaleFloat{50%{transform:translateY(-7px) rotate(3deg)}}
+.royalePills{display:flex;flex-wrap:wrap;gap:7px;margin-top:13px}.royalePill{padding:7px 9px;border-radius:999px;background:#17101d;border:1px solid #51315e;color:#bcaac8;font-size:10px;font-weight:850}.royalePill b{color:var(--gold)}
+.royaleSection{margin-top:13px}.royaleCard{background:linear-gradient(145deg,#21102f,#0e0615);border:1px solid #4b2867;border-radius:22px;padding:15px;box-shadow:0 18px 55px rgba(0,0,0,0.5)}
+.royaleBetGrid{display:grid;grid-template-columns:repeat(5,1fr);gap:7px;margin-top:9px}.royaleBet{padding:11px 4px;border-radius:13px;background:#17101d;border:1px solid #51315e;font-weight:950;font-size:12px;transition:.16s;color:#fff}.royaleBet:active{transform:scale(.97)}.royaleBet.active{color:#07030d;background:linear-gradient(135deg,var(--violet),var(--pink));border-color:var(--pink);box-shadow:0 0 0 1px rgba(255,63,200,0.4),0 0 25px rgba(255,63,200,0.2)}
+.royaleActionRow{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}.royaleCodeRow{display:flex;gap:8px;align-items:stretch}.royaleInput{width:100%;padding:13px 12px;border-radius:13px;background:#0d0615;border:1px solid #51315e;color:#fff;outline:none;text-transform:uppercase;font-weight:900;letter-spacing:2px;text-align:center}.royaleInput:focus{border-color:var(--pink);box-shadow:0 0 0 2px rgba(255,63,200,0.2)}.royaleMini{padding:12px 13px;border-radius:13px;background:#1d0d2b;border:1px solid #51315e;font-weight:900;white-space:nowrap;color:#fff}.royaleMini:active{transform:scale(.98)}
+.royaleRoomTop{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}.royaleCode{font-size:26px;letter-spacing:4px;font-weight:950;color:var(--gold);text-shadow:0 0 20px rgba(255,212,92,0.3)}.royaleStatus{font-size:10px;color:var(--muted);margin-top:3px}.royaleCopy{padding:8px 10px;border-radius:11px;background:#17101d;border:1px solid #51315e;font-size:11px;font-weight:900;color:#fff}.royaleCopy:active{transform:scale(.96)}
+.royaleRound{margin-top:13px;padding:11px 12px;border-radius:14px;background:#100719;border:1px solid #42235a;display:flex;align-items:center;justify-content:space-between;gap:10px}.royaleRound b{color:var(--pink)}.royaleRound small{color:var(--muted)}.royalePot{color:var(--gold);font-weight:950}
+.royalePlayers{display:grid;gap:7px;margin-top:10px}.royalePlayer{display:flex;align-items:center;gap:9px;padding:10px;border-radius:14px;background:#130822;border:1px solid #301544;position:relative;overflow:hidden}.royalePlayer.me{border-color:var(--pink);box-shadow:inset 0 0 0 1px rgba(255,63,200,0.15)}.royalePlayer.ready{background:linear-gradient(145deg,#21102f,#130822)}.royaleAvatar{width:34px;height:34px;flex:0 0 34px;border-radius:11px;display:grid;place-items:center;background:linear-gradient(135deg,var(--violet),var(--pink));color:#fff;font-weight:950}.royalePlayerMain{min-width:0;flex:1}.royalePlayerName{font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.royalePlayerMeta{font-size:9px;color:var(--muted);margin-top:2px}.royalePlayerScore{text-align:right;font-weight:950;color:var(--cyan)}.royalePlayerPlace{display:block;color:var(--gold);font-size:9px;margin-top:2px}.royaleHost{font-size:9px;color:var(--gold);margin-left:4px}.royaleReadyDot{width:8px;height:8px;border-radius:50%;background:#3c2550;box-shadow:0 0 0 3px #1f0f2d}.royaleReadyDot.on{background:var(--pink);box-shadow:0 0 0 3px rgba(255,63,200,0.2),0 0 12px var(--pink)}
+.royaleSpinBox{margin-top:13px;padding:15px;border-radius:20px;background:radial-gradient(circle at 50% 0%,#2c1247,#100719 72%);border:1px solid #623a80;text-align:center}.royaleReels{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin:12px 0}.royaleReel{height:78px;border-radius:15px;background:#09040e;border:1px solid #3b1b52;display:grid;place-items:center;font-size:38px;box-shadow:inset 0 0 24px #000;transition:.18s}.royaleReel.flash{animation:royaleReelFlash .48s ease}@keyframes royaleReelFlash{0%{transform:scale(.96);filter:brightness(.8)}50%{transform:scale(1.05);filter:brightness(1.5);box-shadow:0 0 30px rgba(255,63,200,0.5)}100%{transform:scale(1);filter:none}}
+.royaleSpinInfo{min-height:24px;color:var(--gold);font-weight:900;font-size:12px}.royaleWait{font-size:11px;color:var(--muted);line-height:1.45}
+.royaleTable{margin-top:10px;display:grid;gap:6px}.royaleTableRow{display:grid;grid-template-columns:34px 1fr 62px 52px;align-items:center;gap:6px;padding:9px 8px;border-radius:12px;background:#100719;border:1px solid #32164b;font-size:10px}.royaleTableRow.head{background:#1b0b2d;color:var(--muted);font-size:9px;text-transform:uppercase}.royaleTableRow .place{text-align:center;color:var(--gold);font-weight:950}.royaleTableRow .rname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:850}.royaleTableRow .rscore{text-align:right;color:var(--cyan);font-weight:950}.royaleTableRow .rstate{text-align:right;color:var(--muted)}
+.royaleFinal{padding:17px;border-radius:22px;background:radial-gradient(circle at 50% 0%,#3b174f,#100719 65%);border:1px solid #8d5cff;text-align:center;box-shadow:0 0 45px rgba(141,92,255,0.2)}.royaleFinalCrown{font-size:46px;filter:drop-shadow(0 0 15px rgba(255,212,92,0.8));animation:royaleCrown 1.7s ease-in-out infinite}@keyframes royaleCrown{50%{transform:translateY(-5px) rotate(-2deg)}}.royaleFinalTitle{font-size:23px;font-weight:950;margin:4px 0;color:#fff}.royalePrize{font-size:30px;font-weight:950;color:var(--gold);text-shadow:0 0 22px rgba(255,212,92,0.4)}.royaleFinalMeta{font-size:11px;color:var(--muted);margin-top:3px}
+.royaleError{padding:12px;border-radius:14px;background:#2d0b16;border:1px solid #852643;color:#ff8ea2;font-size:11px;line-height:1.4}.royaleEmpty{padding:16px;text-align:center;color:var(--muted);border:1px dashed #51315e;border-radius:15px;background:#100719}.royaleHidden{display:none!important}
+.leaderboardMeta{text-align:left}.leaderMetaGrid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}.leaderMetaGrid>div{padding:10px 12px;border:1px solid #301544;border-radius:13px;background:#130822}.leaderMetaGrid span{display:block;color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.7px}.leaderMetaGrid b{display:block;color:var(--gold);font-size:18px;margin-top:3px}.leaderMe{border-color:var(--pink)!important;box-shadow:0 0 0 1px rgba(255,63,200,0.3),0 0 20px rgba(255,63,200,0.15)}.youBadge{font-size:8px;color:#07030d;background:var(--pink);padding:3px 5px;border-radius:6px;margin-left:5px;font-weight:950}
+</style>
+</head>
+<body>
+<div id="loading">
+  <div class="loadbox">
+    <div class="cat">🔥</div>
+    <div class="loadtitle">SQAD TOLYATTI</div>
+    <div class="loadsub">GAME & AUCTION ULTIMATE</div>
+    <div class="bar"><i id="loadbar"></i></div>
+    <div class="loadstep" id="loadstep">Инициализация сквада...</div>
+  </div>
+</div>
+
+<div id="app"><div class="wrap">
+<header class="header">
+  <div class="brand">SQAD Game<small>TOLYATTI ULTIMATE</small></div>
+  <div class="user">
+    <div class="avatar" id="avatar">S</div>
+    <div class="uname" id="headerUser">Участник</div>
+  </div>
+</header><!-- HOME SCREEN -->
+<section id="home" class="screen active">
+  <div class="hero">
+    <div class="eyebrow">SQAD TOLYATTI COMMUNITY</div>
+    <div class="h1">Играй, фарми баллы.
+Забирай призы на аукционе!</div>
+    <div class="balanceBox">
+      <div><small>ТВОИ БАЛЛЫ SQAD</small><div class="num" id="homeBalance">0</div></div>
+      <div><small style="text-align:right">РЕЙТИНГ</small><div class="num rankValue" id="homeRank">—</div></div>
+    </div>
+    <div class="stats">
+      <div class="stat"><b id="homeScore">0</b><span>БАЛЛЫ</span></div>
+      <div class="stat"><b id="homeBest">0</b><span>РЕКОРД</span></div>
+      <div class="stat"><b id="homeLevel">1</b><span>УРОВЕНЬ</span></div>
+    </div>
+  </div>
+
+  <div class="sectionTitle">🔥 Эксклюзив сквада</div>
+  <div class="arcadeGrid">
+    <button class="mode" onclick="openScreen('auction')">
+      <div class="modePreview previewAuction"><div class="previewBadge" style="background:#5a4e15;color:#ffd45c">HOT AUCTION</div><div class="previewIcon">🏷️</div></div>
+      <b>Аукцион призов</b><span>Делай ставки и забирай лут</span>
+    </button>
+    <button class="mode" onclick="openScreen('royale')">
+      <div class="modePreview previewRoyale"><div class="previewBadge">MULTIPLAYER</div><div class="previewIcon">👑</div></div>
+      <b>SQAD Royale</b><span>Баттл до 8 игроков по коду</span>
+    </button>
+  </div>
+
+  <div class="sectionTitle">⚡ Аркада и Риск</div>
+  <div class="arcadeGrid">
+    <button class="mode" onclick="openScreen('classic')">
+      <div class="modePreview previewClassic"><div class="previewBadge">SLOTS</div><div class="previewIcon">🎰</div></div>
+      <b>Classic Show</b><span>Огненный слот и джекпот</span>
+    </button>
+    <button class="mode" onclick="openScreen('flip')">
+      <div class="modePreview previewFlip"><div class="previewBadge">FREE & RISK</div><div class="previewIcon">🪙</div></div>
+      <b>SQAD Flip</b><span>Угадай сторону монеты 2x</span>
+    </button>
+    <button class="mode" onclick="openScreen('tap')">
+      <div class="modePreview previewTap"><div class="previewBadge">FREE GAME</div><div class="previewIcon">⚡</div></div>
+      <b>Tap Beat</b><span>Кликай быстрее за 10 секунд</span>
+    </button>
+    <button class="mode" onclick="openScreen('time')">
+      <div class="modePreview previewTime"><div class="previewBadge">30 SEC</div><div class="previewIcon">⏱️</div></div>
+      <b>Time Rush</b><span>Максимум очков за время</span>
+    </button>
+    <button class="mode" onclick="openScreen('target')">
+      <div class="modePreview previewTarget"><div class="previewBadge">SKILL</div><div class="previewIcon">🎯</div></div>
+      <b>Target Hunt</b><span>Охота за символом сквада</span>
+    </button>
+    <button class="mode" onclick="openScreen('leaderboard')">
+      <div class="modePreview previewTime"><div class="previewBadge">TOP</div><div class="previewIcon">⭐</div></div>
+      <b>Рейтинг сквада</b><span>Кто главный тусовщик Тольятти</span>
+    </button>
+  </div>
+
+  <div class="sectionTitle">Ежедневный бонус комьюнити</div>
+  <div class="gamecard">
+    <div id="dailyText">+50 XP за первый запуск сегодня</div>
+    <button class="primary" id="dailyBtn" style="margin-top:10px" onclick="claimDaily()">Забрать +50 XP</button>
+  </div>
+</section>
+
+<!-- AUCTION SCREEN -->
+<section id="auction" class="screen">
+  <div class="sectionTitle">🏷️ Аукцион призов SQAD</div>
+  <div class="gamecard" style="text-align:left">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <span style="font-size:10px;background:#30250b;color:#ffd45c;border:1px solid #8b6a1e;padding:3px 8px;border-radius:99px;font-weight:950">АКТИВНЫЙ ЛОТ</span>
+      <span class="muted" id="aucTimer" style="font-size:11px">Завершение через: 02:14:50</span>
+    </div>
+    <div style="font-size:20px;font-weight:950;color:#fff;margin-bottom:4px" id="aucTitle">VIP Проходка на закрытую тусовку SQAD + Мерч Hoodie</div>
+    <div class="muted" style="font-size:12px;margin-bottom:14px" id="aucDesc">Эксклюзивный доступ на нашу следующую вечеринку в Тольятти + фирменный худи бренда.</div>
+    
+    <div style="background:#130822;border:1px solid #301544;border-radius:15px;padding:12px;margin-bottom:14px">
+      <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
+        <span class="muted">Текущая ставка:</span>
+        <b style="color:var(--gold);font-size:16px"><span id="aucCurrentBid">450</span> баллов</b>
+      </div>
+      <div style="font-size:11px;color:var(--muted)">Лидер аукциона: <b id="aucLeader" style="color:#fff">@alex_sqad</b></div>
+    </div>
+
+    <div class="muted" style="font-size:11px;margin-bottom:6px">Поднять ставку быстрыми кнопками:</div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-bottom:10px">
+      <button class="secondary" onclick="placeAuctionBid(5)">+5 баллов</button>
+      <button class="secondary" onclick="placeAuctionBid(10)">+10 баллов</button>
+      <button class="secondary" onclick="placeAuctionBid(50)">+50 баллов</button>
+    </div>
+
+    <div style="display:flex;gap:8px">
+      <input id="aucCustomInput" class="royaleInput" type="number" placeholder="Своя сумма" style="text-align:left;padding:11px">
+      <button class="primary" style="width:auto;padding:11px 18px" onclick="placeAuctionCustomBid()">ПОСТАВИТЬ</button>
+    </div>
+  </div>
+</section>
+
+<!-- CLASSIC SCREEN -->
+<section id="classic" class="screen">
+  <div class="sectionTitle">🎰 Classic Show</div>
+  <div class="gamecard">
+    <div class="muted">Собери три одинаковых символа сквада</div>
+    <div class="reels">
+      <div class="reel" id="c1">🔥</div>
+      <div class="reel" id="c2">🎟️</div>
+      <div class="reel" id="c3">🎧</div>
+    </div>
+    <div class="result" id="classicResult"></div>
+    <button class="primary" id="classicBtn" onclick="spinClassic()">КРУТИТЬ БАРАБАН</button>
+    <div class="muted" style="margin-top:12px;font-size:11px">Серия: <b id="classicStreak">0</b> · Игры: <b id="classicGames">0</b></div>
+  </div>
+</section>
+
+<!-- SQAD FLIP SCREEN -->
+<section id="flip" class="screen">
+  <div class="sectionTitle">🪙 SQAD Flip (Орел и Решка)</div>
+  <div class="gamecard">
+    <div class="muted">Рискни баллами или играй на бесплатный бонус!</div>
+    <div style="font-size:64px;margin:20px 0" id="flipCoin">🪙</div>
+    <div class="result" id="flipResult">Выбери сторону монеты</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
+      <button class="secondary" id="flipHeadBtn" onclick="playFlip('head')" style="border-color:var(--pink)">🔥 ОРЕЛ (SQAD)</button>
+      <button class="secondary" id="flipTailBtn" onclick="playFlip('tail')" style="border-color:var(--cyan)">⭐ РЕШКА (STAR)</button>
+    </div>
+    <div class="muted" style="font-size:11px">Ставка: <b>10 баллов</b> (награда: 20 баллов)</div>
+  </div>
+</section>
+
+<!-- TAP BEAT SCREEN -->
+<section id="tap" class="screen">
+  <div class="sectionTitle">⚡ Tap Beat (Кликер вайба)</div>
+  <div class="gamecard">
+    <div class="muted">Успей кликнуть как можно чаще за 10 секунд!</div>
+    <div class="timer" id="tapTime">10</div>
+    <div class="bigscore" id="tapClicks">0 кликов</div>
+    <div class="result" id="tapResult">Жми на кнопку ниже!</div>
+    <button class="primary" id="tapBtn" onclick="tapClick()" style="background:linear-gradient(100deg,#00b85c,#35ff8a);color:#031008;font-size:20px;padding:22px">ТАПАКЙ ВАЙБ 🔥</button>
+  </div>
+</section>
+
+<!-- TIME SCREEN -->
+<section id="time" class="screen">
+  <div class="sectionTitle">⏱️ Time Rush</div>
+  <div class="gamecard">
+    <div class="timer" id="timeLeft">30</div>
+    <div class="muted">секунд на адреналин</div>
+    <div class="bigscore" id="timeScore">0</div>
+    <div class="reels">
+      <div class="reel" id="t1">🔥</div>
+      <div class="reel" id="t2">🎟️</div>
+      <div class="reel" id="t3">🎧</div>
+    </div>
+    <div class="result" id="timeResult"></div>
+    <button class="primary" id="timeBtn" onclick="timeAction()">СТАРТ РАУНДА</button>
+  </div>
+</section><!-- TARGET SCREEN -->
+<section id="target" class="screen">
+  <div class="sectionTitle">🎯 Target Hunt</div>
+  <div class="gamecard">
+    <div class="muted">Цель сквада</div>
+    <div class="target" id="targetSymbol">🎯</div>
+    <div class="muted">Попаданий: <b id="targetHits">0</b> / 3</div>
+    <div class="reels">
+      <div class="reel" id="g1">🔥</div>
+      <div class="reel" id="g2">🎟️</div>
+      <div class="reel" id="g3">🎧</div>
+    </div>
+    <div class="result" id="targetResult"></div>
+    <button class="primary" id="targetBtn" onclick="spinTarget()">ИСКАТЬ ЦЕЛЬ</button>
+  </div>
+</section>
+
+<!-- PROFILE SCREEN -->
+<section id="profile" class="screen">
+  <div class="sectionTitle">👤 Профиль участника</div>
+  <div class="profile">
+    <div class="bigavatar" id="profileAvatar">S</div>
+    <div>
+      <div style="font-size:20px;font-weight:950" id="profileName">Участник</div>
+      <div class="muted" id="profileTag">@sqad</div>
+      <div style="margin-top:8px;font-size:12px">Уровень <b id="profileLevel">1</b> · <span id="profileXP">0</span> XP</div>
+      <div class="levelbar"><i id="xpbar"></i></div>
+    </div>
+  </div>
+  <div class="balanceBox">
+    <div><small>БАЛЛЫ SQAD</small><div class="num" id="profileBalance">0</div></div>
+    <div><small style="text-align:right">РЕЙТИНГ</small><div class="num rankValue" id="profileRank">—</div></div>
+  </div>
+  <div class="stats" style="margin-top:12px">
+    <div class="stat"><b id="pGames">0</b><span>ИГР</span></div>
+    <div class="stat"><b id="pBest">0</b><span>РЕКОРД</span></div>
+    <div class="stat"><b id="pStreak">0</b><span>СЕРИЯ</span></div>
+  </div>
+</section>
+
+<!-- PUBLIC PROFILE -->
+<section id="userProfile" class="screen">
+  <div class="sectionTitle">👤 Профиль участника сквада</div>
+  <div class="profile">
+    <div class="bigavatar" id="viewAvatar">S</div>
+    <div>
+      <div style="font-size:20px;font-weight:950" id="viewName">Участник</div>
+      <div class="muted" id="viewTag">@sqad</div>
+      <div style="margin-top:8px;font-size:12px">Уровень <b id="viewLevel">1</b></div>
+    </div>
+  </div>
+  <div class="balanceBox">
+    <div><small>БАЛЛЫ SQAD</small><div class="num" id="viewBalance">0</div></div>
+    <div><small style="text-align:right">ПОЗИЦИЯ</small><div class="num rankValue" id="viewRank">—</div></div>
+  </div>
+  <div class="stats" style="margin-top:12px">
+    <div class="stat"><b id="viewGames">0</b><span>ИГР</span></div>
+    <div class="stat"><b id="viewBest">0</b><span>РЕКОРД</span></div>
+    <div class="stat"><b id="viewRegistered">—</b><span>В SQAD С</span></div>
+  </div>
+</section>
+
+<!-- ACHIEVEMENTS -->
+<section id="achievements" class="screen">
+  <div class="sectionTitle">🏆 Достижения SQAD</div>
+  <div class="list" id="achList"></div>
+</section>
+
+<!-- LEADERBOARD -->
+<section id="leaderboard" class="screen">
+  <div class="sectionTitle">⭐ Топ тусовщиков Тольятти</div>
+  <div class="gamecard leaderboardMeta" style="margin-bottom:10px">
+    <div style="font-weight:900">Рейтинг сообщества SQAD</div>
+    <div class="muted" style="font-size:11px;margin-top:4px">Самые активные игроки и тусовщики сквада.</div>
+    <div class="leaderMetaGrid">
+      <div><span>Участников</span><b id="leaderCount">—</b></div>
+      <div><span>Твое место</span><b id="leaderMyRank">—</b></div>
+    </div>
+  </div>
+  <div class="list" id="leaderList"><div class="empty">Загружаем рейтинг...</div></div>
+</section>
+
+<!-- SQAD ROYALE SCREEN -->
+<section id="royale" class="screen">
+  <div class="sectionTitle">👑 SQAD Royale (Мультиплеер)</div>
+  <div id="royaleLobby">
+    <div class="royaleHero">
+      <div class="royaleKicker">SQAD BATTLE ARENA</div>
+      <div class="royaleTitle">SQAD Royale</div>
+      <div class="royaleSub">Собери свой сквад по коду комнаты и рубись за призовой банк баллов. 5 раундов, серверный рандом и чистый соревновательный вайб Тольятти!</div>
+      <div class="royaleGlow">🔥</div>
+      <div class="royalePills"><span class="royalePill"><b>2–8</b> игроков</span><span class="royalePill"><b>5</b> раундов</span><span class="royalePill"><b>70/30</b> призовой фонд</span></div>
+    </div>
+    <div class="royaleSection royaleCard">
+      <div style="font-weight:950">Создать комнату</div>
+      <div class="muted" style="font-size:11px;margin-top:4px">Выбери ставку в баллах. Возвращается при выходе до старта.</div>
+      <div class="royaleBetGrid">
+        <button class="royaleBet active" data-royale-bet="10" onclick="selectRoyaleBet(10,this)">10</button>
+        <button class="royaleBet" data-royale-bet="25" onclick="selectRoyaleBet(25,this)">25</button>
+        <button class="royaleBet" data-royale-bet="50" onclick="selectRoyaleBet(50,this)">50</button>
+        <button class="royaleBet" data-royale-bet="100" onclick="selectRoyaleBet(100,this)">100</button>
+        <button class="royaleBet" data-royale-bet="250" onclick="selectRoyaleBet(250,this)">250</button>
+      </div>
+      <button class="primary" id="royaleCreateBtn" style="margin-top:10px" onclick="royaleCreate()">🔥 СОЗДАТЬ КОМНАТУ</button>
+    </div>
+    <div class="royaleSection royaleCard">
+      <div style="font-weight:950">Войти по коду</div>
+      <div class="muted" style="font-size:11px;margin-top:4px">Введи 6-значный код комнаты друга.</div>
+      <div class="royaleCodeRow" style="margin-top:9px">
+        <input id="royaleJoinCode" class="royaleInput" maxlength="6" inputmode="text" autocomplete="off" placeholder="SQAD63" oninput="this.value=this.value.toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,6)">
+        <button class="royaleMini" onclick="royaleJoin()">ВОЙТИ</button>
+      </div>
+    </div>
+    <div class="royaleSection royaleCard" style="padding:12px">
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:center"><span class="muted" style="font-size:11px">Твой баланс баллов</span><b id="royaleLobbyBalance" style="color:var(--gold)">0</b></div>
+    </div>
+  </div>
+
+  <div id="royaleRoom" class="royaleHidden">
+    <div class="royaleCard">
+      <div class="royaleRoomTop">
+        <div>
+          <div class="muted" style="font-size:9px;letter-spacing:1.5px">КОД КОМНАТЫ SQAD</div>
+          <div class="royaleCode" id="royaleRoomCode">------</div>
+          <div class="royaleStatus" id="royaleRoomStatus">Сбор сквада</div>
+        </div>
+        <button class="royaleCopy" onclick="copyRoyaleCode()">📋 КОПИРОВАТЬ</button>
+      </div>
+      <div class="royaleRound">
+        <div><small>РАУНД</small><div><b id="royaleRoundNow">0</b> <span class="muted">/ 5</span></div></div>
+        <div style="text-align:right"><small>БАНК БАЛЛОВ</small><div class="royalePot" id="royalePot">0</div></div>
+      </div>
+      <div class="royalePlayers" id="royalePlayers"></div>
+      <div class="royaleActionRow" id="royaleLobbyActions">
+        <button class="secondary" id="royaleReadyBtn" onclick="royaleToggleReady()">✓ ГОТОВ</button>
+        <button class="primary" id="royaleStartBtn" onclick="royaleStart()">🔥 СТАРТ</button>
+      </div>
+      <button class="secondary" id="royaleLeaveBtn" style="width:100%;margin-top:8px" onclick="royaleLeave()">← ВЫЙТИ ИЗ КОМНАТЫ</button>
+    </div>
+
+    <div id="royalePlayArea" class="royaleSpinBox royaleHidden">
+      <div class="royaleKicker">SQAD SPIN</div>
+      <div style="font-size:18px;font-weight:950;margin-top:3px">Твой ход в раунде</div>
+      <div class="royaleReels">
+        <div class="royaleReel" id="rr1">🔥</div>
+        <div class="royaleReel" id="rr2">🎟️</div>
+        <div class="royaleReel" id="rr3">🎧</div>
+      </div>
+      <div class="royaleSpinInfo" id="royaleSpinInfo">Каждый участник делает по спину</div>
+      <div class="royaleWait" id="royaleSpinWait">Ждем остальных участников...</div>
+      <button class="primary" id="royaleSpinBtn" style="margin-top:10px" onclick="royaleSpin()">🎰 КРУТИТЬ SQAD</button>
+    </div>
+
+    <div id="royaleFinal" class="royaleHidden" style="margin-top:13px"></div><div class="royaleCard" style="margin-top:13px">
+      <div style="font-weight:950">Таблица баттла</div>
+      <div id="royaleScoreTable" class="royaleTable"></div>
+    </div>
+  </div>
+  <div id="royaleError" class="royaleHidden" style="margin-top:10px"></div>
+</section>
+
+</div>
+<nav class="footer">
+  <button class="nav active" data-screen="home" onclick="openScreen('home')"><i>🏠</i>Главная</button>
+  <button class="nav" data-screen="auction" onclick="openScreen('auction')"><i>🏷️</i>Аукцион</button>
+  <button class="nav" data-screen="royale" onclick="openScreen('royale')"><i>👑</i>Баттл</button>
+  <button class="nav" data-screen="profile" onclick="openScreen('profile')"><i>👤</i>Профиль</button>
+  <button class="nav" data-screen="leaderboard" onclick="openScreen('leaderboard')"><i>⭐</i>Топ</button>
+</nav>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+/* SQAD ULTIMATE CONFIG */
+const SQAD_BUILD={
+  version:'SQAD.2.0',
+  buildId:'SQAD-TOLYATTI-ULTIMATE',
+  storageKey:'sqad_game_v2',
+  gameUrl:'https://lrdaovhvmjagfldmhufh.supabase.co/functions/v1/game',
+  royaleUrl:'https://lrdaovhvmjagfldmhufh.supabase.co/functions/v1/royale'
+};
+const symbols=['🔥','🎟️','🎧','🍸','⭐','📱','👑'];
+const achievements=[
+  {id:'first',icon:'🚀',title:'Старт в SQAD',desc:'Сыграй первую игру',ok:d=>d.games>=1},
+  {id:'combo5',icon:'🔥',title:'В ударе',desc:'Собери серию x5',ok:d=>d.maxStreak>=5},
+  {id:'score100',icon:'💯',title:'Первая сотня',desc:'Набери 100 баллов',ok:d=>d.score>=100},
+  {id:'best500',icon:'👑',title:'Легенда сквада',desc:'Дойди до 500 баллов',ok:d=>d.best>=500},
+  {id:'level5',icon:'⭐',title:'Элита SQAD',desc:'Достигни 5 уровня',ok:d=>d.level>=5},
+  {id:'games10',icon:'🎮',title:'Актив',desc:'Сыграй 10 игр',ok:d=>d.games>=10},
+  {id:'games50',icon:'🏆',title:'Ветеран тусовок',desc:'Сыграй 50 игр',ok:d=>d.games>=50},
+  {id:'score1000',icon:'💎',title:'Топ мира',desc:'Набери 1000 баллов',ok:d=>d.score>=1000}
+];
+const DEFAULT_DATA={score:0,best:0,streak:0,maxStreak:0,games:0,xp:0,level:1,achievements:[],dailyDate:'',dailyClaimed:false};
+let data={...DEFAULT_DATA};
+let tg=window.Telegram?.WebApp||null;
+let tgUser=null,isOwner=false,serverProfile=null,currentScreen='home';
+let social={rank:null,playerCount:0,leaderboard:[],viewedProfile:null};
+let classicBusy=false,targetBusy=false,timeBusy=false,timeEnd=0,timeScore=0,timeTimer=null,targetHits=0;
+let tapActive=false,tapCount=0,tapTimer=null;
+let auctionState={currentBid:450,leader:'@alex_sqad'};
+
+function safeInt(v,f=0){const n=Number(v);return Number.isFinite(n)?Math.max(0,Math.floor(n)):f}
+function normalizeData(raw){const d={...DEFAULT_DATA,...(raw||{})};d.score=safeInt(d.score);d.best=safeInt(d.best);d.streak=safeInt(d.streak);d.maxStreak=safeInt(d.maxStreak);d.games=safeInt(d.games);d.xp=safeInt(d.xp);d.level=Math.max(1,safeInt(d.level,1));d.achievements=Array.isArray(d.achievements)?[...new Set(d.achievements)]:[];return d}
+function escapeHTML(s){return String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":''','"':'&quot;'}[c]))}
+function ownerBadge(){return isOwner?'<span class="owner">👑 SQAD BOSS</span>':''}
+function userName(){return tgUser?.first_nametgUser?.username'Участник'}
+function username(){return tgUser?.username?('@'+tgUser.username):'SQAD User'}
+function avatarLetter(){return (userName().trim()[0]||'S').toUpperCase()}
+function toast(msg){const el=document.getElementById('toast');el.textContent=msg;el.classList.add('show');clearTimeout(toast.t);toast.t=setTimeout(()=>el.classList.remove('show'),2200)}
+function haptic(type='light'){try{tg?.HapticFeedback?.impactOccurred(type)}catch(e){}}
+
+function saveLocal(){try{localStorage.setItem(SQAD_BUILD.storageKey,JSON.stringify({...data,_savedAt:Date.now()}))}catch(e){}}
+function readLocal(key){try{const v=localStorage.getItem(key);return v?JSON.parse(v):null}catch(e){return null}}
+async function loadData(){const local=readLocal(SQAD_BUILD.storageKey);if(local){const d=normalizeData(local);data.dailyClaimed=Boolean(d.dailyClaimed);data.dailyDate=String(d.dailyDate||'');data.achievements=Array.isArray(d.achievements)?d.achievements:[]}}
+
+let achievementSyncBusy=false;
+async function checkAchievements(){
+  if(achievementSyncBusy)return;achievementSyncBusy=true;
+  try{
+    for(const a of achievements){
+      if(data.achievements.includes(a.id)||!a.ok(data))continue;
+      try{
+        const r=await serverApi('achievement_claim',{achievement_id:a.id});
+        if(r.ok&&!data.achievements.includes(a.id)){
+          data.achievements.push(a.id);
+          if(r.total_xp!=null)data.xp=safeInt(r.total_xp);
+          data.level=Math.max(1,safeInt(r.level,Math.floor(data.xp/100)+1));
+          toast('🏆 Достижение SQAD: '+a.title);
+        }
+      }catch(e){}
+    }
+    saveLocal();
+  }finally{achievementSyncBusy=false}
+}
+
+async function claimDaily(){
+  if(data.dailyClaimed)return toast('Бонус уже получен сегодня');
+  const btn=document.getElementById('dailyBtn');if(btn)btn.disabled=true;
+  try{
+    const r=await serverApi('daily_claim');
+    data.dailyClaimed=true;data.dailyDate=new Date().toISOString().slice(0,10);
+    if(r.total_xp!=null)data.xp=safeInt(r.total_xp);
+    data.level=Math.max(1,safeInt(r.level,Math.floor(data.xp/100)+1));
+    saveLocal();updateUI();await checkAchievements();updateUI();toast('🎁 Получено +50 XP в копилку SQAD!');haptic('medium');
+  }catch(e){
+    if(e.message==='DAILY_ALREADY_CLAIMED'){data.dailyClaimed=true;updateUI();toast('Бонус уже забран сегодня')}
+    else {toast('⚠️ Ошибка получения бонуса');if(btn)btn.disabled=false}
+  }
+}
+function setText(id,v){const e=document.getElementById(id);if(e)e.textContent=v}
+
+async function serverApi(action, extra={}){
+  if(!tg?.initData) throw new Error('Telegram initData is empty');
+  const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),12000);
+  try{
+    const response=await fetch(SQAD_BUILD.gameUrl,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({initData:tg.initData,action,...extra}),signal:controller.signal});
+    const result=await response.json().catch(()=>({}));
+    if(!response.ok!result.ok) throw new Error(result.error('SERVER_'+response.status));
+    return result;
+  }catch(e){if(e?.name==='AbortError')throw new Error('SERVER_TIMEOUT');throw e;}finally{clearTimeout(timeout)}
+}
+
+function formatPoints(v){const n=safeInt(v);try{return new Intl.NumberFormat('ru-RU').format(n)}catch(e){return String(n)}}
+function formatRank(v){const n=safeInt(v,0);return n>0?'#'+n:'—'}
+function formatDate(v){if(!v)return '—';try{return new Date(v).toLocaleDateString('ru-RU')}catch(e){return '—'}}
+
+async function loadSocial(){
+  try{
+    const lb=await serverApi('get_leaderboard',{limit:50});
+    social.leaderboard=Array.isArray(lb.players)?lb.players:(Array.isArray(lb.leaderboard)?lb.leaderboard:[]);
+    social.playerCount=safeInt(lb.player_count, social.leaderboard.length);
+    let rank=safeInt(lb.my_rank,0);
+    if(!rank){
+      const meId=String(serverProfile?.id||'');
+      const me=social.leaderboard.find(p=>String(p.idp.player_id'')===meId  String(p.telegram_id'')===String(tgUser?.id||''));
+      rank=safeInt(me?.rank,0);
+    }
+    social.rank=rank||null;
+    updateLeaderboard();
+    setText('homeRank',formatRank(social.rank));setText('profileRank',formatRank(social.rank));setText('leaderMyRank',formatRank(social.rank));setText('leaderCount',formatPoints(social.playerCount||0));
+  }catch(e){social.leaderboard=[];social.rank=null;social.playerCount=0;updateLeaderboard();}
+}
+
+async function openPublicProfile(id){
+  if(!id)return;
+  try{
+    const r=await serverApi('get_profile',{player_id:id});
+    const p=r.profiler.userr;
+    social.viewedProfile=p;
+    setText('viewName',p.display_namep.username'Участник');
+    setText('viewTag',p.username?('@'+String(p.username).replace(/^@/,'')):'SQAD');setText('viewLevel',p.level??1);setText('viewBalance',formatPoints(p.points??p.balance??0));setText('viewRank',formatRank(p.rank));
+    setText('viewGames',p.games??0);setText('viewBest',p.best??p.best_score??0);setText('viewRegistered',formatDate(p.created_at));
+    setText('viewAvatar',(p.avatarp.display_namep.username||'S').toString()[0].toUpperCase());
+    openScreen('userProfile');
+  }catch(e){toast('⚠️ Не удалось открыть профиль')}
+}
+
+function updateUI(){
+  setText('homeScore',formatPoints(data.score));setText('homeBalance',formatPoints(data.score));setText('homeBest',formatPoints(data.best));setText('homeLevel',data.level);
+  setText('profileBalance',formatPoints(data.score));setText('profileRank',formatRank(social.rank));
+  setText('profileName',userName());document.getElementById('profileName').insertAdjacentHTML('beforeend',ownerBadge());setText('profileTag',username());setText('profileLevel',data.level);setText('profileXP',data.xp);
+  setText('pGames',data.games);setText('pBest',formatPoints(data.best));setText('pStreak',data.maxStreak);
+  setText('classicStreak',data.streak);setText('classicGames',data.games);setText('timeScore',timeScore);setText('targetHits',targetHits);
+  const xpIntoLevel=data.xp%100;document.getElementById('xpbar').style.width=xpIntoLevel+'%';
+  const daily=document.getElementById('dailyBtn');
+  if(data.dailyClaimed){daily.disabled=true;daily.textContent='Бонус уже забран';setText('dailyText','Заходи завтра за новой порцией XP')}
+  else{daily.disabled=false;daily.textContent='Забрать +50 XP';setText('dailyText','+50 XP за первый вход сегодня')}
+  document.getElementById('headerUser').innerHTML=escapeHTML(userName())+ownerBadge();
+  document.getElementById('avatar').textContent=avatarLetter();document.getElementById('profileAvatar').textContent=avatarLetter();
+  setText('aucCurrentBid',auctionState.currentBid);setText('aucLeader',auctionState.leader);
+  updateAchievements();updateLeaderboard();
+}
+
+function updateAchievements(){const el=document.getElementById('achList');el.innerHTML=achievements.map(a=>{const ok=data.achievements.includes(a.id);return <div class="row ${ok?'':'locked'}"><div class="ach"><div class="achicon">${a.icon}</div><div><div style="font-weight:900">${escapeHTML(a.title)}</div><div class="muted" style="font-size:11px">${escapeHTML(a.desc)}</div></div></div><b>${ok?'✓':'🔒'}</b></div>}).join('')}
+function updateLeaderboard(){
+  const arr=Array.isArray(social.leaderboard)?social.leaderboard:[];
+  const el=document.getElementById('leaderList');if(!el)return;
+  if(!arr.length){el.innerHTML='<div class="empty">Рейтинг сквада загружается...</div>';return}
+  const meId=String(serverProfile?.id'');const meTg=String(tgUser?.id'');
+  el.innerHTML=arr.slice(0,50).map((x,i)=>{
+    const id=x.idx.player_idx.telegram_id||'';
+    const name=x.display_namex.usernamex.name||'Участник';
+    const score=x.points??x.balance??x.score??0;
+    const isMe=(meId&&String(id)===meId)(meTg&&String(x.telegram_id'')===meTg);
+    return <div class="row clickrow ${isMe?'leaderMe':''}" onclick="openPublicProfile('${escapeHTML(String(id))}')"><div class="rowmain"><div class="rank">${x.rank??i+1}</div><div class="mini">${i===0?'🔥':i===1?'⚡':i===2?'⭐':'🍸'}</div><div class="rowname">${escapeHTML(name)}${isMe?' <span class="youBadge">ТЫ</span>':''}</div></div><div class="score">${formatPoints(score)}</div></div>
+  }).join('')
+}
+
+function openScreen(id){
+  if(currentScreen==='time'&&id!=='time'&&timeBusy){toast('⏱️ Заверши Time Rush');return}
+  if(currentScreen==='classic'&&classicBusy){toast('🔥 Ждем результат спина');return}
+  if(currentScreen==='target'&&targetBusy){toast('🎯 Ждем цель');return}
+  document.querySelectorAll('.screen').forEach(e=>e.classList.toggle('active',e.id===id));
+  document.querySelectorAll('.nav').forEach(e=>e.classList.toggle('active',e.dataset.screen===id));
+  currentScreen=id;window.scrollTo(0,0);updateUI();
+  if(id==='leaderboard'||id==='profile')loadSocial();
+  try{tg?.BackButton?.show()}catch(e){}
+}
+function randomSymbol(){return symbols[Math.floor(Math.random()*symbols.length)]}
+function animateReels(ids,duration=520){return new Promise(resolve=>{const start=Date.now();const timer=setInterval(()=>{ids.forEach(id=>setText(id,randomSymbol()));if(Date.now()-start>=duration){clearInterval(timer);resolve()}},75)})}
+
+/* AUCTION BID SYSTEM */
+function placeAuctionBid(amount){
+  const add=safeInt(amount);
+  if(data.score<add+auctionState.currentBid){toast('⚠️ Недостаточно баллов для ставки!');return;}
+  auctionState.currentBid+=add;
+  auctionState.leader='@'+(tgUser?.username||'my_sqad');
+  data.score-=add;
+  saveLocal();updateUI();toast('🏷️ Ставка повышена на '+add+' баллов!');haptic('medium');
+}
+function placeAuctionCustomBid(){
+  const inp=document.getElementById('aucCustomInput');
+  const val=safeInt(inp?.value);
+  if(val<=0){toast('Введи сумму ставки');return;}
+  if(val<=auctionState.currentBid){toast('Ставка должна быть выше текущей ('+auctionState.currentBid+')');return;}
+  const diff=val-auctionState.currentBid;
+  if(data.score<diff){toast('Недостаточно баллов!');return;}
+  data.score-=diff;
+  auctionState.currentBid=val;
+  auctionState.leader='@'+(tgUser?.username||'my_sqad');
+  inp.value='';
+  saveLocal();updateUI();toast('🏷️ Новая лидирующая ставка: '+val+' баллов!');haptic('medium');
+}
+
+/* CLASSIC SLOTS */
+async function spinClassic(){
+  if(classicBusy)return;classicBusy=true;const btn=document.getElementById('classicBtn');btn.disabled=true;haptic();
+  try{
+    await animateReels(['c1','c2','c3']);
+    const r=await serverApi('classic_spin');
+    const game=r.game||r;
+    const syms=game.symbols||[];
+    if(syms.length===3)syms.forEach((symbol,i)=>setText(['c1','c2','c3'][i],symbol));
+    data.score=safeInt(game.balance);data.xp=safeInt(game.total_xp);data.games=safeInt(game.games);data.streak=safeInt(game.streak);data.maxStreak=safeInt(game.max_streak);
+    if(game.result==='triple')setText('classicResult','🔥 ДЖЕКПОТ СКВАДА! +'+game.points+' баллов');
+    else if(game.result==='pair')setText('classicResult','✨ Отличный вайб! +'+game.points+' баллов');
+    else setText('classicResult','Мимо · +'+game.points+' балл');
+    updateUI();await checkAchievements();updateUI();haptic('light');
+  }catch(e){setText('classicResult','⚠️ Ошибка связи со сквадом.');}finally{classicBusy=false;btn.disabled=false;}
+}
+
+/* NEW GAME: SQAD FLIP */
+function playFlip(side){
+  const cost=10;
+  if(data.score<cost){toast('Нужно минимум 10 баллов для ставки');return;}
+  data.score-=cost;
+  const coin=document.getElementById('flipCoin');
+  coin.style.transform='rotateY(720deg)';
+  setTimeout(()=>{coin.style.transform='none';},400);
+  const win=Math.random()>=0.5;
+  if(win){
+    const reward=cost*2;
+    data.score+=reward;
+    data.games++;
+    data.xp+=5;
+    setText('flipResult','🔥 Победа! Х2 балла (+'+reward+')');
+    toast('🎉 Выигрыш на монете!');
+    haptic('medium');
+  }else{
+    data.games++;
+    setText('flipResult','❌ Мимо! Попробуй еще раз.');
+    haptic('light');
+  }
+  saveLocal();updateUI();
+}
+
+/* NEW GAME: TAP BEAT */
+function tapClick(){
+  if(!tapActive){
+    startTapGame();
+    return;
+  }
+  tapCount++;
+  setText('tapClicks',tapCount+' кликов');
+  haptic('light');
+}
+function startTapGame(){
+  tapActive=true;tapCount=0;
+  let left=10;
+  const btn=document.getElementById('tapBtn');
+  btn.textContent='ЖМИ БЫСТРЕЕ!';
+  setText('tapResult','Кликай изо всех сил!');
+  clearInterval(tapTimer);
+  tapTimer=setInterval(()=>{
+    left--;
+    setText('tapTime',left);
+    if(left<=0){
+      clearInterval(tapTimer);
+      tapActive=false;
+      const earned=tapCount*2;
+      data.score+=earned;
+      data.games++;
+      data.xp+=10;
+      btn.textContent='ТАКАТЬ ЕЩЕ РАЗ';
+      setText('tapResult','🏁 Время вышло! Заработано: +'+earned+' баллов');
+      saveLocal();updateUI();toast('⚡ Зачислено +'+earned+' баллов!');haptic('heavy');
+    }
+  },1000);
+}/* TIME RUSH */
+function timeAction(){if(timeBusy)return;startTimeGame()}
+function startTimeGame(){timeBusy=true;timeScore=0;timeEnd=Date.now()+30000;setText('timeResult','');const btn=document.getElementById('timeBtn');btn.textContent='КРУТИТЬ!';btn.disabled=false;clearInterval(timeTimer);timeTimer=setInterval(()=>{const left=Math.max(0,timeEnd-Date.now());setText('timeLeft',Math.ceil(left/1000));if(left<=0)endTimeGame()},100);toast('⏱️ Погнали тайм-раунд!')}
+async function spinTime(){
+  if(!timeBusy||Date.now()>=timeEnd)return endTimeGame();
+  const btn=document.getElementById('timeBtn');btn.disabled=true;
+  try{
+    const r=await serverApi('time_spin');const game=r.game||r;
+    await animateReels(['t1','t2','t3'],260);
+    if(!timeBusy){btn.disabled=false;return}
+    const syms=game.symbols||[];if(syms.length===3)syms.forEach((symbol,i)=>setText(['t1','t2','t3'][i],symbol));
+    const pts=safeInt(game.points);timeScore+=pts;
+    data.score=safeInt(game.balance);data.xp=safeInt(game.total_xp);data.games=safeInt(game.games);data.streak=safeInt(game.streak);data.maxStreak=safeInt(game.max_streak);
+    setText('timeScore',timeScore);setText('timeResult','+'+pts+' баллов');updateUI();
+    if(Date.now()>=timeEnd)endTimeGame();
+  }catch(e){setText('timeResult','⚠️ Подожди секунду')}finally{btn.disabled=false;if(Date.now()>=timeEnd&&timeBusy)endTimeGame()}
+}
+document.getElementById('timeBtn').addEventListener('click',()=>{if(timeBusy)spinTime()});
+
+async function endTimeGame(){
+  if(!timeBusy)return;timeBusy=false;clearInterval(timeTimer);timeTimer=null;setText('timeLeft','0');document.getElementById('timeBtn').disabled=true;setText('timeResult','⏳ Фиксируем результат на сервере...');
+  try{
+    const r=await serverApi('time_complete');const game=r.game||r;
+    data.score=safeInt(game.balance);data.xp=safeInt(game.total_xp);data.games=safeInt(game.games);data.streak=safeInt(game.streak);data.maxStreak=safeInt(game.max_streak);
+    setText('timeResult','🏁 Раунд завершен! +'+timeScore+' баллов');checkAchievements();updateUI();haptic('medium');
+  }catch(e){setText('timeResult','⚠️ Не удалось завершить раунд');}finally{document.getElementById('timeBtn').disabled=false;document.getElementById('timeBtn').textContent='СТАРТ РАУНДА';updateUI()}
+}
+
+/* TARGET HUNT */
+function newTarget(){setText('targetSymbol',randomSymbol());targetHits=0;setText('targetHits',0)}
+async function spinTarget(){
+  if(targetBusy)return;targetBusy=true;const btn=document.getElementById('targetBtn');btn.disabled=true;
+  try{
+    const target=document.getElementById('targetSymbol').textContent;
+    const r=await serverApi('target_spin',{target});const game=r.game||r;
+    await animateReels(['g1','g2','g3']);
+    const syms=game.symbols||[];if(syms.length===3)syms.forEach((symbol,i)=>setText(['g1','g2','g3'][i],symbol));
+    const hits=safeInt(game.hits),pts=safeInt(game.points);targetHits+=hits;
+    data.score=safeInt(game.balance);data.xp=safeInt(game.total_xp);data.games=safeInt(game.games);data.streak=safeInt(game.streak);data.maxStreak=safeInt(game.max_streak);
+    setText('targetHits',targetHits);setText('targetResult',hits?('🎯 Попаданий: '+hits+' · +'+pts+' баллов'):'Мимо');
+    if(targetHits>=3){
+      const completed=await serverApi('target_complete');const cg=completed.game||completed;
+      data.score=safeInt(cg.balance);data.xp=safeInt(cg.total_xp);data.games=safeInt(cg.games);data.streak=safeInt(cg.streak);data.maxStreak=safeInt(cg.max_streak);
+      targetHits=0;setTimeout(newTarget,500);toast('🎯 Цель сквада выполнена!');
+    }
+    checkAchievements();updateUI();
+  }catch(e){setText('targetResult','⚠️ Ошибка сервера')}finally{targetBusy=false;btn.disabled=false;}
+}
+
+async function initTelegram(){
+  if(!tg)return false;
+  try{
+    tg.ready();tg.expand();tg.setHeaderColor('#07030d');tg.setBackgroundColor('#07030d');
+    tgUser=tg.initDataUnsafe?.user||null;
+    tg.BackButton.onClick(()=>openScreen('home'));
+    if(!tg.initData)throw new Error('No initData');
+    const result=await serverApi('get_me');
+    serverProfile=result.user||result.profile;
+    const u=serverProfile||{};
+    tgUser={...tgUser,id:u.telegram_id,username:(u.username'').replace(/^@/,''),first_name:u.display_nametgUser?.first_name||'Участник'};
+    isOwner=u.role==='OWNER';
+    return true;
+  }catch(e){isOwner=false;return false;}
+}
+
+async function loadServerBalance(){
+  const r=await serverApi('get_balance');
+  const b=r.balance||{};
+  data.score=safeInt(b.points);data.xp=safeInt(b.xp);data.games=safeInt(b.games);data.streak=safeInt(b.streak);data.maxStreak=safeInt(b.max_streak);data.best=safeInt(b.best);
+  data.level=Math.max(1,safeInt(b.level,Math.floor(data.xp/100)+1));
+  data.achievements=Array.isArray(b.achievements)?b.achievements:[];
+  data.dailyClaimed=Boolean(b.daily_claimed);
+  data.dailyDate=new Date().toISOString().slice(0,10);
+  saveLocal();
+  return true;
+}
+
+async function loading(){
+  const steps=[['Сборка стиля SQAD...',20],['Синхронизация профиля...',45],['Загрузка баллов...',70],['Включаем вайб Тольятти...',90],['Готово!',100]];
+  for(const [s,p] of steps){setText('loadstep',s);document.getElementById('loadbar').style.width=p+'%';await new Promise(r=>setTimeout(r,100))}
+  document.getElementById('loading').style.opacity='0';
+  setTimeout(()=>{document.getElementById('loading').remove();document.getElementById('app').style.display='block'},400);
+}
+
+royalePatchOpenScreen();
+(async function(){
+  try{
+    await initTelegram();
+    await loadData();
+    await loadServerBalance();
+    await checkAchievements();
+    await loadSocial();
+    newTarget();
+    updateUI();
+    await loading();
+  }catch(e){
+    setText('loadstep','Ошибка подключения к серверу SQAD');
+    document.getElementById('loadbar').style.width='100%';
+    setTimeout(()=>{
+      document.getElementById('loading').style.opacity='0';
+      document.getElementById('app').style.display='block';
+      toast('⚠️ Проверь подключение к серверу.');
+    },300);
+  }
+})();
+</script>
+</body>
+</html>
